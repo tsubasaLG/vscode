@@ -526,6 +526,10 @@ impl<S: Serialization, C: Send + Sync> RpcDispatcher<S, C> {
 	pub fn context(&self) -> Arc<C> {
 		self.context.clone()
 	}
+
+	pub fn set_context(&mut self, context: C) {
+		self.context = Arc::new(context)
+	}
 }
 
 struct StreamRec {

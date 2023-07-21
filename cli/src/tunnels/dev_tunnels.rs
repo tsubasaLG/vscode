@@ -3,9 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 use crate::auth;
-use crate::constants::{
-	CONTROL_PORT, IS_INTERACTIVE_CLI, PROTOCOL_VERSION_TAG, TUNNEL_SERVICE_USER_AGENT,
-};
+use crate::constants::{IS_INTERACTIVE_CLI, PROTOCOL_VERSION_TAG, TUNNEL_SERVICE_USER_AGENT};
 use crate::state::{LauncherPaths, PersistedState};
 use crate::util::errors::{
 	wrap, AnyError, DevTunnelError, InvalidTunnelName, TunnelCreationFailed, WrappedError,
@@ -136,6 +134,7 @@ pub struct DevTunnels {
 	log: log::Logger,
 	launcher_tunnel: PersistedState<Option<PersistedTunnel>>,
 	client: TunnelManagementClient,
+	tag: &'static str,
 }
 
 /// Representation of a tunnel returned from the `start` methods.
@@ -188,6 +187,7 @@ impl ActiveTunnel {
 }
 
 const VSCODE_CLI_TUNNEL_TAG: &str = "vscode-server-launcher";
+const VSCODE_CLI_FORWARDING_TAG: &str = "vscode-port-forward";
 const MAX_TUNNEL_NAME_LENGTH: usize = 20;
 
 fn get_host_token_from_tunnel(tunnel: &Tunnel) -> String {
@@ -244,7 +244,29 @@ pub struct ExistingTunnel {
 }
 
 impl DevTunnels {
-	pub fn new(log: &log::Logger, auth: auth::Auth, paths: &LauncherPaths) -> DevTunnels {
+	/// Creates a new DevTunnels client used for port forwarding.
+	pub fn new_port_forwarding(
+		log: &log::Logger,
+		auth: auth::Auth,
+		paths: &LauncherPaths,
+	) -> DevTunnels {
+		let mut client = new_tunnel_management(&TUNNEL_SERVICE_USER_AGENT);
+		client.authorization_provider(auth);
+
+		DevTunnels {
+			log: log.clone(),
+			client: client.into(),
+			launcher_tunnel: PersistedState::new(paths.root().join("port_forwarding_tunnel.json")),
+			tag: VSCODE_CLI_FORWARDING_TAG,
+		}
+	}
+
+	/// Creates a new DevTunnels client used for the Remote Tunnels extension to access the VS Code Server.
+	pub fn new_remote_tunnel(
+		log: &log::Logger,
+		auth: auth::Auth,
+		paths: &LauncherPaths,
+	) -> DevTunnels {
 		let mut client = new_tunnel_management(&TUNNEL_SERVICE_USER_AGENT);
 		client.authorization_provider(auth);
 
@@ -252,6 +274,7 @@ impl DevTunnels {
 			log: log.clone(),
 			client: client.into(),
 			launcher_tunnel: PersistedState::new(paths.root().join("code_tunnel.json")),
+			tag: VSCODE_CLI_TUNNEL_TAG,
 		}
 	}
 
@@ -366,6 +389,7 @@ impl DevTunnels {
 		&mut self,
 		preferred_name: Option<&str>,
 		use_random_name: bool,
+		preserve_ports: &[u16],
 	) -> Result<ActiveTunnel, AnyError> {
 		let (mut tunnel, persisted) = match self.launcher_tunnel.load() {
 			Some(mut persisted) => {
@@ -409,7 +433,7 @@ impl DevTunnels {
 		for port_to_delete in tunnel
 			.ports
 			.iter()
-			.filter(|p| p.port_number != CONTROL_PORT)
+			.filter(|p: &&TunnelPort| !preserve_ports.contains(&p.port_number))
 		{
 			let output_fut = self.client.delete_tunnel_port(
 				&locator,
@@ -461,11 +485,7 @@ impl DevTunnels {
 		self.check_is_name_free(name).await?;
 
 		let new_tunnel = Tunnel {
-			tags: vec![
-				name.to_string(),
-				PROTOCOL_VERSION_TAG.to_string(),
-				VSCODE_CLI_TUNNEL_TAG.to_string(),
-			],
+			tags: self.get_tags(name),
 			..Default::default()
 		};
 
@@ -524,7 +544,7 @@ impl DevTunnels {
 		let mut tags = vec![
 			name.to_string(),
 			PROTOCOL_VERSION_TAG.to_string(),
-			VSCODE_CLI_TUNNEL_TAG.to_string(),
+			self.tag.to_string(),
 		];
 
 		if is_wsl_installed(&self.log) {
@@ -616,7 +636,7 @@ impl DevTunnels {
 			self.log,
 			self.log.span("dev-tunnel.listall"),
 			self.client.list_all_tunnels(&TunnelRequestOptions {
-				tags: vec![VSCODE_CLI_TUNNEL_TAG.to_string()],
+				tags: vec![self.tag.to_string()],
 				require_all_tags: true,
 				..Default::default()
 			})
@@ -631,7 +651,7 @@ impl DevTunnels {
 			self.log,
 			self.log.span("dev-tunnel.rename.search"),
 			self.client.list_all_tunnels(&TunnelRequestOptions {
-				tags: vec![VSCODE_CLI_TUNNEL_TAG.to_string(), name.to_string()],
+				tags: vec![self.tag.to_string(), name.to_string()],
 				require_all_tags: true,
 				..Default::default()
 			})
